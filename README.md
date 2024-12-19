@@ -18,7 +18,15 @@ Right now, the plugin only works with WooCommerce and Pagar.me as payment gatewa
 6. Go to WooCommerce > Settings > Payments > Pagar.me and configure your Pagar.me API keys
 7. Go to Pagar.me Recipients and add the main recipient.
 8. Go to the product you want to split the payment and set the seller in the "Product Data" metabox
-9. Done!
+9. Go to file `wp-content/plugins/pagarme-payments-for-woocommerce/vendor/pagarme/ecommerce-module-core/src/Kernel/Services/APIService.php` and look for the following line:
+```php
+$configInfo = $this->configInfoService->retrieveInfo("");
+```
+10. Add the following line after the line above:
+```php 
+$orderRequest = apply_filters('pagarme_modify_order_request', $orderRequest);
+```
+11. Done!
 
 ## How it works
 Right now it works only with single product checkout. When the customer buys a product, the plugin will split the payment between the main recipient and the seller of the product. The recipient defined in the product will receive the percentage of the product value defined in the product, while the main recipient will receive the remaining value.
