@@ -1,82 +1,4 @@
-<?php 
-
-// Hook into Pagar.me split rules
-// add_filter("pagarme_split_order", 'add_pagarme_split_rules', 10, 2);
-function add_pagarme_split_rules(\WC_Order $order, $paymentMethod) {
-    $splitArray = [
-        'sellers' => [],
-        'marketplace' => [
-            'totalCommission' => 0
-        ]
-    ];
-
-    // Iterate through order items
-    foreach ($order->get_items() as $item_id => $item) {
-        $product_id = $item->get_product_id();
-
-        // Fetch product meta data
-        $recipient_id = get_post_meta($product_id, '_pagarme_recipient_id', true);
-        $split_type = get_post_meta($product_id, '_pagarme_split_type', true);
-        $split_value = get_post_meta($product_id, '_pagarme_split_value', true);
-
-        // Ensure all meta data is present
-        if (!$recipient_id || !$split_type || !$split_value) {
-            continue; // Skip this product if split data is incomplete
-        }
-
-        // Calculate split values
-        $line_total = $item->get_total() * 100; // Convert to cents
-        $marketplace_commission = 0;
-        $recipient_commission = 0;
-
-        if ($split_type === 'percentage') {
-            $marketplace_commission = intval(($split_value / 100) * $line_total);
-        } elseif ($split_type === 'fixed') {
-            $marketplace_commission = intval($split_value * 100);
-        }
-
-        $recipient_commission = $line_total - $marketplace_commission;
-
-        // Add seller split data
-        $splitArray['sellers'][] = [
-            'marketplaceCommission' => $marketplace_commission,
-            'commission' => $recipient_commission,
-            'pagarmeId' => $recipient_id
-        ];
-
-        // Add marketplace commission
-        $splitArray['marketplace']['totalCommission'] += $marketplace_commission;
-    }
-    
-    $ret = array(array(
-        "amount" => 50,
-        "recipient_id" => "re_cm4t4e5eg0wig0l9tqdyci0vc",
-        "type" => "percentage",
-        "options" => array(
-            "charge_processing_fee" => true,
-            "charge_remainder_fee" => true,
-            "liable" => true
-       )
-    ),
-    array(
-        "amount" => 50,
-        "type" => "percentage",
-        "recipient_id" => "re_cm4t4e5eg0wig0l9tqdyci0vc",
-        "options" => array(
-            "charge_processing_fee" => false,
-            "charge_remainder_fee" => false,
-            "liable" => false
-        )
-      )
-  );
-    error_log('this is the splitarray' . json_encode($ret));
-    
-    return $ret;
-
-    // return $splitArray;
-}
-
-
+<?php
 /**
  * Filter to modify the order request payments and add splits.
  *
@@ -102,45 +24,97 @@ function modify_order_payments_split($orderRequest)
             $payment->split = [];
         }
 
-        foreach ($orderRequest->items as $item) {
-            // Check if the metadata `_pp_split_recipient` exists
+        $order = wc_get_order($orderRequest->code);
+        $order_data = [
+            "order_id" => $order->get_id(),
+            "status" => $order->get_status(),
+            "customer_id" => $order->get_customer_id(),
+            "total" => $order->get_total(),
+            "items" => [],
+            "refunds" => $order->get_refunds(),
+        ];
 
-            $productId = $item->code; // Assuming the item has an ID corresponding to the product or order item ID
-            error_log('find until here now' . $productId);
+        foreach ($order->get_items() as $item_id => $item) {
+            $order_data['items'][] = [
+                "item_id" => $item_id,
+                "product_id" => $item->get_product_id(),
+                "variation_id" => $item->get_variation_id(),
+                "quantity" => $item->get_quantity(),
+                "subtotal" => $item->get_subtotal(),
+                "total" => $item->get_total(),
+                "name" => $item->get_name(),
+                "sku" => $item->get_product() ? $item->get_product()->get_sku() : null,
+                "meta_data" => $item->get_meta_data(),
+            ];
+        }
+        error_log("here is the order" . json_encode($order_data));
+
+        foreach ($order_data['items'] as $item) {
+            $productId = $item["product_id"]; // Assuming 'code' is the product or order item ID
+            $itemTotal = $item["total"];
+
+            // Retrieve splits for this product
             $splits = get_post_meta($productId, '_pagarme_splits', true);
             if (!empty($splits)) {
+                $itemTotalCents = round($itemTotal * 100); // Convert to cents
                 $remainingPercentage = 100;
+                $remainingAmount = $itemTotalCents;
+
                 foreach ($splits as $split) {
-                    // adding split
+                    $splitAmountCents = floor(($itemTotalCents * $split['percentage']) / 100);
+                    $remainingAmount = $remainingAmount - $splitAmountCents;
+
                     $payment->split[] = [
-                        "amount" => $split["percentage"],
-                        "recipient_id" => $split["recipient_id"],
-                        "type" => "percentage",
+                        "amount" => $splitAmountCents,
+                        "recipient_id" => $split['recipient_id'],
+                        "type" => "flat", // Use "flat" for calculated amounts
                         "options" => [
                             "charge_processing_fee" => !!($split['processing_fee'] === "yes"),
                             "charge_remainder_fee" => false,
                             "liable" => !!($split['liable'] === "yes")
                         ]
                     ];
-                    $remainingPercentage = $remainingPercentage - $split["percentage"];
+                    $remainingPercentage -= $split['percentage'];
                 }
 
-                // Add the remaining split to the main recipient
                 $payment->split[] = [
-                    "amount" => $remainingPercentage,
+                    "amount" => $remainingAmount,
                     "recipient_id" => $mainRecipientId,
-                    "type" => "percentage",
+                    "type" => "flat",
                     "options" => [
                         "charge_processing_fee" => true,
-                        "charge_remainder_fee" => true,
+                        "charge_remainder_fee" => false,
+                        "liable" => true
+                    ]
+                ];
+            } else {
+                // If no splits are defined, assign the entire amount to the main recipient
+                $payment->split[] = [
+                    "amount" => $itemTotal * 100,
+                    "recipient_id" => $mainRecipientId,
+                    "type" => "flat",
+                    "options" => [
+                        "charge_processing_fee" => true,
+                        "charge_remainder_fee" => false,
                         "liable" => true
                     ]
                 ];
             }
         }
+        // once we have the splits, set chanrge_remainder_fee to true for the last main recipient
+        $payment->split[] = [
+            "amount" => 0,
+            "recipient_id" => $mainRecipientId,
+            "type" => "flat",
+            "options" => [
+                "charge_processing_fee" => true,
+                "charge_remainder_fee" => true,
+                "liable" => true
+            ]
+        ];
     }
-    
-    error_log('find here all set to return ' . json_encode($orderRequest));
+
+    error_log('Order request processed with splits: ' . json_encode($orderRequest));
 
     return $orderRequest;
 }
