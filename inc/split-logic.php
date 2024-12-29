@@ -18,81 +18,48 @@ function modify_order_payments_split($orderRequest)
         return $orderRequest;
     }
 
+    // Get the order
+    $order = wc_get_order($orderRequest->code);
+    $totalOrderValue = $order->get_total() * 100; // Convert to cents 150
+    $totalAssignedPercentage = 0;
+
     foreach ($orderRequest->payments as $payment) {
-        // Ensure 'split' is set and initialize if not
         if (!isset($payment->split) || !is_array($payment->split)) {
             $payment->split = [];
         }
 
-        $order = wc_get_order($orderRequest->code);
-        $order_data = [
-            "order_id" => $order->get_id(),
-            "status" => $order->get_status(),
-            "customer_id" => $order->get_customer_id(),
-            "total" => $order->get_total(),
-            "items" => [],
-            "refunds" => $order->get_refunds(),
-        ];
+        foreach ($order->get_items() as $item) {
+            $productId = $item->get_product_id();
+            $itemTotal = $item->get_total() * 100; // Convert to cents 100
+            $itemContributionToOrder = ($itemTotal / $totalOrderValue) * 100; // Item's percentage of the total order
 
-        foreach ($order->get_items() as $item_id => $item) {
-            $order_data['items'][] = [
-                "item_id" => $item_id,
-                "product_id" => $item->get_product_id(),
-                "variation_id" => $item->get_variation_id(),
-                "quantity" => $item->get_quantity(),
-                "subtotal" => $item->get_subtotal(),
-                "total" => $item->get_total(),
-                "name" => $item->get_name(),
-                "sku" => $item->get_product() ? $item->get_product()->get_sku() : null,
-                "meta_data" => $item->get_meta_data(),
-            ];
-        }
-        error_log("here is the order" . json_encode($order_data));
-
-        foreach ($order_data['items'] as $item) {
-            $productId = $item["product_id"]; // Assuming 'code' is the product or order item ID
-            $itemTotal = $item["total"];
-
-            // Retrieve splits for this product
+            // Get splits for the product
             $splits = get_post_meta($productId, '_pagarme_splits', true);
-            if (!empty($splits)) {
-                $itemTotalCents = round($itemTotal * 100); // Convert to cents
-                $remainingPercentage = 100;
-                $remainingAmount = $itemTotalCents;
 
+            if (!empty($splits) && is_array($splits) && count($splits) > 0 && $splits[0]['percentage'] > 0) {
                 foreach ($splits as $split) {
-                    $splitAmountCents = floor(($itemTotalCents * $split['percentage']) / 100);
-                    $remainingAmount = $remainingAmount - $splitAmountCents;
+                    $splitPercentage = ($itemContributionToOrder * $split['percentage']) / 100;
+                    $totalAssignedPercentage += round($splitPercentage);
 
                     $payment->split[] = [
-                        "amount" => $splitAmountCents,
+                        "amount" => round($splitPercentage),
                         "recipient_id" => $split['recipient_id'],
-                        "type" => "flat", // Use "flat" for calculated amounts
+                        "type" => "percentage",
                         "options" => [
                             "charge_processing_fee" => !!($split['processing_fee'] === "yes"),
                             "charge_remainder_fee" => false,
                             "liable" => !!($split['liable'] === "yes")
                         ]
                     ];
-                    $remainingPercentage -= $split['percentage'];
                 }
+            } else {
+                // If no splits are defined, assign item's full contribution to the main recipient
+                $totalAssignedPercentage += round($itemContributionToOrder);
 
                 $payment->split[] = [
-                    "amount" => $remainingAmount,
+                    "amount" => round($itemContributionToOrder),
                     "recipient_id" => $mainRecipientId,
-                    "type" => "flat",
-                    "options" => [
-                        "charge_processing_fee" => true,
-                        "charge_remainder_fee" => false,
-                        "liable" => true
-                    ]
-                ];
-            } else {
-                // If no splits are defined, assign the entire amount to the main recipient
-                $payment->split[] = [
-                    "amount" => $itemTotal * 100,
-                    "recipient_id" => $mainRecipientId,
-                    "type" => "flat",
+                    "type" => "percentage",
                     "options" => [
                         "charge_processing_fee" => true,
                         "charge_remainder_fee" => false,
@@ -101,11 +68,13 @@ function modify_order_payments_split($orderRequest)
                 ];
             }
         }
-        // once we have the splits, set chanrge_remainder_fee to true for the last main recipient
+
+        // Assign remaining percentage to the main recipient
+        $remainingPercentage = 100 - $totalAssignedPercentage;
         $payment->split[] = [
-            "amount" => 0,
+            "amount" => $remainingPercentage,
             "recipient_id" => $mainRecipientId,
-            "type" => "flat",
+            "type" => "percentage",
             "options" => [
                 "charge_processing_fee" => true,
                 "charge_remainder_fee" => true,
@@ -114,7 +83,7 @@ function modify_order_payments_split($orderRequest)
         ];
     }
 
-    error_log('Order request processed with splits: ' . json_encode($orderRequest));
+    error_log('Order request processed with normalized percentage splits: ' . json_encode($orderRequest));
 
     return $orderRequest;
 }
