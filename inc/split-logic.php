@@ -18,33 +18,56 @@ function modify_order_payments_split($orderRequest)
         return $orderRequest;
     }
 
-    // Get the order
+    $pyment = json_decode(json_encode($orderRequest->payments[0], true));
+    $noOfInstallments = $pyment->credit_card->installments;;
+    $installments_without_interest = get_option('woocommerce_woo-pagarme-payments-credit_card_cc_installments_without_interest', 1);
+    $baseInterestRate = get_option('woocommerce_woo-pagarme-payments-credit_card_cc_installments_interest', 10);
+    $incrementalInterestRate = get_option('woocommerce_woo-pagarme-payments-credit_card_cc_installments_interest_increase', 1);
+
     $order = wc_get_order($orderRequest->code);
-    $totalOrderValue = $order->get_total() * 100; // Convert to cents 150
-    $totalAssignedPercentage = 0;
+    $i = 0;
+
+    $totalInterestRate = 0;
+
+    if($noOfInstallments > $installments_without_interest) {
+        $totalInterestRate = $baseInterestRate + ($incrementalInterestRate * ($noOfInstallments - $installments_without_interest - 1));
+    }
+
+
+    $totalOrderValue = 0;
+    foreach ($order->get_items() as $item) {
+        $orderRequest->items[$i]->amount = round(($item->get_total() + ($item->get_total() * $totalInterestRate / 100)) * 100);
+        $totalOrderValue += $orderRequest->items[$i]->amount;
+        $i++;
+    }
+
+
+    // Get the order
+    $remainingAmount = $totalOrderValue;
+
+    error_log('starting from here' . $remainingAmount . 'then orderRequest: ' . json_encode($orderRequest, true));
 
     foreach ($orderRequest->payments as $payment) {
         if (!isset($payment->split) || !is_array($payment->split)) {
             $payment->split = [];
         }
 
-        foreach ($order->get_items() as $item) {
-            $productId = $item->get_product_id();
-            $itemTotal = $item->get_total() * 100; // Convert to cents 100
-            $itemContributionToOrder = ($itemTotal / $totalOrderValue) * 100; // Item's percentage of the total order
+        foreach ($orderRequest->items as $item) {
+            $productId = $item->code;
+            $itemTotal = $item->amount; // Convert to cents 100
 
             // Get splits for the product
             $splits = get_post_meta($productId, '_pagarme_splits', true);
 
             if (!empty($splits) && is_array($splits) && count($splits) > 0 && $splits[0]['percentage'] > 0) {
                 foreach ($splits as $split) {
-                    $splitPercentage = ($itemContributionToOrder * $split['percentage']) / 100;
-                    $totalAssignedPercentage += round($splitPercentage);
+                    $splitAmount = round(($itemTotal * $split['percentage']) / 100);
+                    $remainingAmount -= round($splitAmount);
 
                     $payment->split[] = [
-                        "amount" => round($splitPercentage),
+                        "amount" => round($splitAmount),
                         "recipient_id" => $split['recipient_id'],
-                        "type" => "percentage",
+                        "type" => "flat",
                         "options" => [
                             "charge_processing_fee" => !!($split['processing_fee'] === "yes"),
                             "charge_remainder_fee" => false,
@@ -54,12 +77,13 @@ function modify_order_payments_split($orderRequest)
                 }
             } else {
                 // If no splits are defined, assign item's full contribution to the main recipient
-                $totalAssignedPercentage += round($itemContributionToOrder);
+                $splitAmount = $itemTotal;
+                $remainingAmount -= round($splitAmount);
 
                 $payment->split[] = [
-                    "amount" => round($itemContributionToOrder),
-                    "recipient_id" => $mainRecipientId,
-                    "type" => "percentage",
+                    "amount" => round($splitAmount),
+                    "recipient_id" => $split['recipient_id'],
+                    "type" => "flat",
                     "options" => [
                         "charge_processing_fee" => true,
                         "charge_remainder_fee" => false,
@@ -70,15 +94,14 @@ function modify_order_payments_split($orderRequest)
         }
 
         // Assign remaining percentage to the main recipient
-        $remainingPercentage = 100 - $totalAssignedPercentage;
         $payment->split[] = [
-            "amount" => $remainingPercentage,
+            "amount" => round($remainingAmount),
             "recipient_id" => $mainRecipientId,
-            "type" => "percentage",
+            "type" => "flat",
             "options" => [
-                "charge_processing_fee" => true,
-                "charge_remainder_fee" => true,
-                "liable" => true
+            "charge_processing_fee" => true,
+            "charge_remainder_fee" => true,
+            "liable" => true
             ]
         ];
     }
